@@ -10,7 +10,8 @@ import torch.nn as nn
 from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
-from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
 SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor | None]
 
@@ -70,6 +71,43 @@ class MeanPool(SequencePoolingMethod):
             result.add_(hidden_states[start:end].sum(dim=0, dtype=torch.float32))
         return result
 
+    @staticmethod
+    def _forward_single_step(
+        hidden_states: torch.Tensor,
+        prompt_lens_cpu: torch.Tensor,
+    ) -> torch.Tensor:
+        num_seqs = prompt_lens_cpu.numel()
+        hidden_size = hidden_states.shape[-1]
+        prompt_lens = async_tensor_h2d(
+            prompt_lens_cpu, device=hidden_states.device, dtype=torch.int64
+        )
+        # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
+        segment_ids = torch.repeat_interleave(
+            torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
+            prompt_lens,
+            output_size=int(prompt_lens_cpu.sum()),
+        )
+        segment_sums = torch.zeros(
+            (num_seqs, hidden_size),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
+
+        bytes_per_token = hidden_size * torch.finfo(torch.float32).bits // 8
+        chunk_size = max(1, _MEAN_POOL_ACCUMULATION_CHUNK_BYTES // bytes_per_token)
+
+        # iterate over the batch in chunks
+        for start in range(0, hidden_states.shape[0], chunk_size):
+            end = min(start + chunk_size, hidden_states.shape[0])
+            # using index_add_ to accumulate for each segment
+            segment_sums.index_add_(
+                0,
+                segment_ids[start:end],
+                hidden_states[start:end].to(dtype=torch.float32),
+            )
+
+        return segment_sums / prompt_lens.unsqueeze(1)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -84,6 +122,24 @@ class MeanPool(SequencePoolingMethod):
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
 
+        # Fast path: every prompt is fully scheduled in this step and no
+        # request carries accumulated state, i.e. the exact conditions under
+        # which MEAN pooling ran before chunked accumulation existed.
+        if not pooling_cursor.is_partial_prefill() and all(
+            state.mean_pool_sum is None and state.mean_pool_count == 0
+            for state in pooling_metadata.pooling_states
+        ):
+            return self._forward_single_step(hidden_states, prompt_lens_cpu)
+
+        return self._forward_accumulate(hidden_states, pooling_metadata, pooling_cursor)
+
+    def _forward_accumulate(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+        pooling_cursor: PoolingCursor,
+    ) -> SequencePoolingMethodOutput:
+        prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
         hidden_states_list = torch.split(
             hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist()
         )

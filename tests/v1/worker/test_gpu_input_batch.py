@@ -439,7 +439,9 @@ def test_pooling_prompt_lens_not_aliased(device: str):
     )
 
 
-def test_pooling_request_removal_cleans_accumulator():
+def test_pooling_request_removal_preserves_accumulator():
+    """Batch removal also covers requests that are merely unscheduled for one
+    step; their accumulated pooling state must survive for the resume."""
     input_batch = InputBatch(
         max_num_reqs=1,
         max_model_len=MAX_PROMPT_SIZE,
@@ -459,8 +461,27 @@ def test_pooling_request_removal_cleans_accumulator():
 
     input_batch.remove_request(req.req_id)
 
+    assert torch.equal(
+        req.pooling_states.mean_pool_sum, torch.ones(4, dtype=torch.float32)
+    )
+    assert req.pooling_states.mean_pool_count == 2
+
+
+def test_pooling_request_preemption_resume_cleans_accumulator():
+    """Resuming from preemption recomputes the prompt from scratch, so any
+    partially accumulated pooling state must be dropped."""
+    req = _construct_pooling_request(0)
+    assert req.pooling_states is not None
+    req.pooling_states.mean_pool_sum = torch.ones(4, dtype=torch.float32)
+    req.pooling_states.mean_pool_count = 2
+    req.pooling_states.hidden_states_cache.append(torch.ones(2, 4))
+
+    req.resume_from_preemption(([7],))
+
+    assert req.block_ids == ([7],)
     assert req.pooling_states.mean_pool_sum is None
     assert req.pooling_states.mean_pool_count == 0
+    assert req.pooling_states.hidden_states_cache == []
 
 
 def test_placeholder_spec_token_ids_written_verbatim():

@@ -1441,8 +1441,7 @@ class GPUModelRunner(
                 assert req_index is None
                 assert new_block_ids is not None
                 # The request is resumed from preemption.
-                # Replace the existing block IDs with the new ones.
-                req_state.block_ids = new_block_ids
+                req_state.resume_from_preemption(new_block_ids)
 
             if req_index is None:
                 # The request is not in the persistent batch.

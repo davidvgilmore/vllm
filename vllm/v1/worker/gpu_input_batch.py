@@ -76,6 +76,13 @@ class CachedRequestState:
     def num_tokens(self) -> int:
         return self.num_prompt_tokens + len(self.output_token_ids)
 
+    def resume_from_preemption(self, new_block_ids: tuple[list[int], ...]) -> None:
+        # Replace the existing block IDs with the new ones. Recompute restarts
+        # the prompt, so drop any partially accumulated pooling state.
+        self.block_ids = new_block_ids
+        if self.pooling_states is not None:
+            self.pooling_states.clean()
+
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
             if self.prompt_token_ids is None:
@@ -559,9 +566,10 @@ class InputBatch:
 
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
-            pooling_state = self.pooling_states.pop(req_id, None)
-            if pooling_state is not None:
-                pooling_state.clean()
+            # Do not clean the popped PoolingStates: removal also covers
+            # requests that are merely unscheduled this step and resume with
+            # their accumulated state intact.
+            self.pooling_states.pop(req_id, None)
             return req_index
 
         self.greedy_reqs.discard(req_id)

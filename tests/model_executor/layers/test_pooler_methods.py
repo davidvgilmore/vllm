@@ -264,6 +264,31 @@ class TestMeanPool:
         assert state.mean_pool_sum is None
         assert state.mean_pool_count == 0
 
+    def test_single_step_fast_path_matches_accumulate(self):
+        """The vectorized single-step path and the per-request accumulate path
+        must agree so results do not depend on which path a batch takes."""
+        hidden = torch.randn(6, 8)
+        pooler = MeanPool()
+        fast = pooler(hidden, _make_metadata([2, 4]))
+
+        # Pre-seeding one zero-valued accumulator forces the accumulate path
+        # without changing the mathematical result.
+        states = [PoolingStates(), PoolingStates()]
+        states[0].mean_pool_sum = torch.zeros(8, dtype=torch.float32)
+        accumulated = pooler(
+            hidden,
+            _make_metadata(
+                [2, 4],
+                num_scheduled_tokens=[2, 4],
+                seq_lens=[2, 4],
+                pooling_states=states,
+            ),
+        )
+
+        assert isinstance(fast, torch.Tensor)
+        assert isinstance(accumulated, torch.Tensor)
+        assert torch.allclose(fast, accumulated, atol=1e-6)
+
     def test_chunked_accumulation(self):
         hidden = torch.arange(20, dtype=torch.float32).reshape(5, 4)
         metadata = _make_metadata([3, 2])
