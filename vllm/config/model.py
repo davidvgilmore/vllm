@@ -1896,30 +1896,31 @@ class ModelConfig:
                 )
                 return False
 
-            if attn_type == "decoder":
-                if (
-                    pooler_config.seq_pooling_type in ("MEAN", "CLS")
-                    or pooler_config.tok_pooling_type == "STEP"
-                ):
-                    logger.debug(
-                        "Pooling models with causal attn and %s/%s pooling "
-                        "do not support chunked prefill.",
-                        pooler_config.seq_pooling_type,
-                        pooler_config.tok_pooling_type,
-                    )
-                    return False
-                else:
-                    logger.debug(
-                        "Pooling models with causal attn and %s/%s pooling "
-                        "support chunked prefill.",
-                        pooler_config.seq_pooling_type,
-                        pooler_config.tok_pooling_type,
-                    )
-                    return True
+            if attn_type == "encoder_decoder":
+                logger.debug(
+                    "Encoder decoder pooling models do not support chunked prefill."
+                )
+                return False
 
-            # vllm currently does not have pooling models using hybrid,
-            # attention_free or encoder_decoder attn types.
-            return attn_type != "encoder_decoder"
+            if (
+                pooler_config.seq_pooling_type == "CLS"
+                or pooler_config.tok_pooling_type == "STEP"
+            ):
+                logger.debug(
+                    "Pooling models with causal attn and %s/%s pooling "
+                    "do not support chunked prefill.",
+                    pooler_config.seq_pooling_type,
+                    pooler_config.tok_pooling_type,
+                )
+                return False
+
+            logger.debug(
+                "Pooling models with causal attn and %s/%s pooling "
+                "support chunked prefill.",
+                pooler_config.seq_pooling_type,
+                pooler_config.tok_pooling_type,
+            )
+            return True
         else:
             # for generative models
             if attn_type == "encoder_decoder":

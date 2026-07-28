@@ -157,6 +157,18 @@ class TestEmbeddingPoolerHead:
         expected = torch.stack(tensors)
         assert torch.equal(out, expected)
 
+    def test_chunked_prefill_preserves_none(self):
+        head = EmbeddingPoolerHead(activation=PoolerNormalize())
+        pooled_data = [torch.randn(_HIDDEN), None, torch.randn(_HIDDEN)]
+        meta = _make_metadata(_make_params(_BATCH, use_activation=True))
+
+        out = head(pooled_data, meta)
+
+        assert isinstance(out, list)
+        assert out[1] is None
+        assert torch.allclose(torch.linalg.norm(out[0]), torch.tensor(1.0))
+        assert torch.allclose(torch.linalg.norm(out[2]), torch.tensor(1.0))
+
     def test_projector_then_matryoshka(self):
         proj = _linear(_HIDDEN, 8)
         head = EmbeddingPoolerHead(projector=proj)
@@ -276,6 +288,18 @@ class TestClassifierPoolerHead:
         assert out.shape == (_BATCH, _HIDDEN)
         expected = torch.stack(tensors)
         assert torch.equal(out, expected)
+
+    def test_chunked_prefill_preserves_none(self):
+        head = ClassifierPoolerHead(logit_mean=1.0, logit_sigma=2.0)
+        pooled_data = [torch.randn(_HIDDEN), None, torch.randn(_HIDDEN)]
+        meta = _make_metadata(_make_params(_BATCH, task="classify"))
+
+        out = head(pooled_data, meta)
+
+        assert isinstance(out, list)
+        assert torch.equal(out[0], (pooled_data[0] - 1.0) / 2.0)
+        assert out[1] is None
+        assert torch.equal(out[2], (pooled_data[2] - 1.0) / 2.0)
 
     def test_classifier_then_platt_scaling(self):
         clf = _linear(_HIDDEN, 3)

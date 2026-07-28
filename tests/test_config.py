@@ -1076,6 +1076,33 @@ def test_is_chunked_prefill_supported(
 
 
 @pytest.mark.parametrize(
+    ("attn_type", "seq_pooling_type", "tok_pooling_type", "expected"),
+    [
+        ("decoder", "MEAN", "ALL", True),
+        ("hybrid", "MEAN", "ALL", True),
+        ("decoder", "CLS", "ALL", False),
+        ("decoder", "LAST", "STEP", False),
+        ("encoder_decoder", "MEAN", "ALL", False),
+    ],
+)
+def test_chunked_prefill_pooling_method_support(
+    attn_type: str,
+    seq_pooling_type: str,
+    tok_pooling_type: str,
+    expected: bool,
+):
+    config = SimpleNamespace(
+        attn_type=attn_type,
+        pooler_config=PoolerConfig(
+            seq_pooling_type=seq_pooling_type,
+            tok_pooling_type=tok_pooling_type,
+        ),
+    )
+
+    assert ModelConfig.is_chunked_prefill_supported.fget(config) is expected
+
+
+@pytest.mark.parametrize(
     ("model_id", "expected_attn_type", "expected_result", "reason"),
     [
         # pooling models

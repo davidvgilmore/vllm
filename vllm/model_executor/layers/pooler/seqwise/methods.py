@@ -10,10 +10,9 @@ import torch.nn as nn
 from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
-SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor | None]
 
 _MEAN_POOL_ACCUMULATION_CHUNK_BYTES = 16 * 1024 * 1024  # 16MB
 
@@ -58,15 +57,25 @@ class LastPool(SequencePoolingMethod):
 
 
 class MeanPool(SequencePoolingMethod):
+    @staticmethod
+    def _sum_chunk(hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_size = hidden_states.shape[-1]
+        bytes_per_token = hidden_size * torch.finfo(torch.float32).bits // 8
+        chunk_size = max(1, _MEAN_POOL_ACCUMULATION_CHUNK_BYTES // bytes_per_token)
+        result = torch.zeros(
+            hidden_size, dtype=torch.float32, device=hidden_states.device
+        )
+        for start in range(0, hidden_states.shape[0], chunk_size):
+            end = min(start + chunk_size, hidden_states.shape[0])
+            result.add_(hidden_states[start:end].sum(dim=0, dtype=torch.float32))
+        return result
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        if pooling_cursor.is_partial_prefill():
-            raise RuntimeError("partial prefill is not supported with MEAN pooling")
-
         prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
         num_seqs = prompt_lens_cpu.numel()
         hidden_size = hidden_states.shape[-1]
@@ -75,35 +84,54 @@ class MeanPool(SequencePoolingMethod):
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
 
-        prompt_lens = async_tensor_h2d(
-            prompt_lens_cpu, device=hidden_states.device, dtype=torch.int64
+        hidden_states_list = torch.split(
+            hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist()
         )
-        # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
-        segment_ids = torch.repeat_interleave(
-            torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
-            prompt_lens,
-            output_size=int(prompt_lens_cpu.sum()),
-        )
-        segment_sums = torch.zeros(
-            (num_seqs, hidden_size),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
+        output_list: list[torch.Tensor | None] = []
+        for state, hidden_states_chunk, scheduled, prompt_len, finished in zip(
+            pooling_metadata.pooling_states,
+            hidden_states_list,
+            pooling_cursor.num_scheduled_tokens_cpu,
+            prompt_lens_cpu,
+            pooling_cursor.is_finished(),
+        ):
+            chunk_sum = self._sum_chunk(hidden_states_chunk)
+            if state.mean_pool_sum is None:
+                state.mean_pool_sum = chunk_sum
+            else:
+                if (
+                    state.mean_pool_sum.shape != chunk_sum.shape
+                    or state.mean_pool_sum.device != chunk_sum.device
+                ):
+                    state.clean()
+                    raise RuntimeError(
+                        "MEAN pooling accumulator does not match the "
+                        "scheduled hidden states"
+                    )
+                state.mean_pool_sum.add_(chunk_sum)
+            state.mean_pool_count += int(scheduled)
 
-        bytes_per_token = hidden_size * torch.finfo(torch.float32).bits // 8
-        chunk_size = max(1, _MEAN_POOL_ACCUMULATION_CHUNK_BYTES // bytes_per_token)
+            if not finished:
+                output_list.append(None)
+                continue
 
-        # iterate over the batch in chunks
-        for start in range(0, hidden_states.shape[0], chunk_size):
-            end = min(start + chunk_size, hidden_states.shape[0])
-            # using index_add_ to accumulate for each segment
-            segment_sums.index_add_(
-                0,
-                segment_ids[start:end],
-                hidden_states[start:end].to(dtype=torch.float32),
-            )
+            if state.mean_pool_count != int(prompt_len):
+                actual_count = state.mean_pool_count
+                state.clean()
+                raise RuntimeError(
+                    "MEAN pooling accumulated an unexpected number of tokens: "
+                    f"{actual_count} != {int(prompt_len)}"
+                )
+            if state.mean_pool_count == 0:
+                state.clean()
+                raise RuntimeError("MEAN pooling requires at least one token")
 
-        return segment_sums / prompt_lens.unsqueeze(1)
+            output_list.append(state.mean_pool_sum / state.mean_pool_count)
+            state.clean()
+
+        if all(output is not None for output in output_list):
+            return torch.stack([output for output in output_list if output is not None])
+        return output_list
 
 
 def get_seq_pooling_method(

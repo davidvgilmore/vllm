@@ -559,7 +559,9 @@ class InputBatch:
 
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
-            self.pooling_states.pop(req_id, None)
+            pooling_state = self.pooling_states.pop(req_id, None)
+            if pooling_state is not None:
+                pooling_state.clean()
             return req_index
 
         self.greedy_reqs.discard(req_id)

@@ -63,6 +63,7 @@ def _make_metadata(
     pooling_params: list[PoolingParams] | None = None,
     num_scheduled_tokens: list[int] | None = None,
     seq_lens: list[int] | None = None,
+    pooling_states: list[PoolingStates] | None = None,
     device: torch.device = _CPU,
 ) -> PoolingMetadata:
     """Build a minimal PoolingMetadata for testing pooling methods."""
@@ -89,7 +90,8 @@ def _make_metadata(
         device=device,
     )
 
-    pooling_states = [PoolingStates() for _ in range(n_seqs)]
+    if pooling_states is None:
+        pooling_states = [PoolingStates() for _ in range(n_seqs)]
 
     return PoolingMetadata(
         prompt_lens=prompt_lens_tensor,
@@ -144,6 +146,8 @@ class TestLastPool:
         out = pooler(hidden, metadata)
         expected = torch.tensor([[3.0, 4.0]])
         assert torch.equal(out, expected)
+        assert metadata.pooling_states[0].mean_pool_sum is None
+        assert metadata.pooling_states[0].mean_pool_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -198,12 +202,67 @@ class TestMeanPool:
         out = pooler(hidden, metadata)
         assert out.shape == (0, 8)
 
-    def test_rejects_partial_prefill(self):
-        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
-        metadata = _make_metadata([3], num_scheduled_tokens=[2])
+    @pytest.mark.parametrize("chunk_sizes", [[2, 2], [1, 1, 2]])
+    def test_chunked_prefill_matches_single_shot(self, chunk_sizes):
+        hidden = torch.arange(16, dtype=torch.float16).reshape(4, 4)
         pooler = MeanPool()
-        with pytest.raises(RuntimeError, match="partial prefill"):
-            pooler(hidden, metadata)
+        expected = pooler(hidden, _make_metadata([4]))
+
+        states = [PoolingStates()]
+        offset = 0
+        for chunk_size in chunk_sizes:
+            offset += chunk_size
+            out = pooler(
+                hidden[offset - chunk_size : offset],
+                _make_metadata(
+                    [4],
+                    num_scheduled_tokens=[chunk_size],
+                    seq_lens=[offset],
+                    pooling_states=states,
+                ),
+            )
+            if offset < len(hidden):
+                assert out == [None]
+                assert states[0].mean_pool_sum is not None
+                assert states[0].mean_pool_sum.dtype == torch.float32
+                assert states[0].mean_pool_count == offset
+
+        assert isinstance(out, torch.Tensor)
+        assert torch.allclose(out, expected)
+        assert states[0].mean_pool_sum is None
+        assert states[0].mean_pool_count == 0
+
+    def test_chunked_prefill_mixed_completion(self):
+        pooler = MeanPool()
+        states = [PoolingStates(), PoolingStates()]
+        hidden = torch.tensor(
+            [[1.0, 3.0], [3.0, 5.0], [10.0, 20.0]], dtype=torch.float32
+        )
+        out = pooler(
+            hidden,
+            _make_metadata(
+                [2, 3],
+                num_scheduled_tokens=[2, 1],
+                seq_lens=[2, 1],
+                pooling_states=states,
+            ),
+        )
+
+        assert isinstance(out, list)
+        assert torch.equal(out[0], torch.tensor([2.0, 4.0]))
+        assert out[1] is None
+        assert states[0].mean_pool_sum is None
+        assert states[1].mean_pool_count == 1
+
+    def test_pooling_state_clean_releases_mean_accumulator(self):
+        state = PoolingStates()
+        state.mean_pool_sum = torch.ones(4, dtype=torch.float32)
+        state.mean_pool_count = 3
+
+        state.clean()
+
+        assert state.mean_pool_sum is None
+        assert state.mean_pool_count == 0
 
     def test_chunked_accumulation(self):
         hidden = torch.arange(20, dtype=torch.float32).reshape(5, 4)

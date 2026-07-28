@@ -439,6 +439,30 @@ def test_pooling_prompt_lens_not_aliased(device: str):
     )
 
 
+def test_pooling_request_removal_cleans_accumulator():
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=MAX_PROMPT_SIZE,
+        max_num_batched_tokens=MAX_PROMPT_SIZE,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=True,
+    )
+    req = _construct_pooling_request(0)
+    assert req.pooling_states is not None
+    req.pooling_states.mean_pool_sum = torch.ones(4, dtype=torch.float32)
+    req.pooling_states.mean_pool_count = 2
+    input_batch.add_request(req)
+
+    input_batch.remove_request(req.req_id)
+
+    assert req.pooling_states.mean_pool_sum is None
+    assert req.pooling_states.mean_pool_count == 0
+
+
 def test_placeholder_spec_token_ids_written_verbatim():
     input_batch = InputBatch(
         max_num_reqs=1,

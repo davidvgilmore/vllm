@@ -38,9 +38,14 @@ class PoolingStates:
     def __init__(self) -> None:
         # for chunked prefill with ALL pooling
         self.hidden_states_cache: list[torch.Tensor] = []
+        # for chunked prefill with causal MEAN pooling
+        self.mean_pool_sum: torch.Tensor | None = None
+        self.mean_pool_count = 0
 
     def clean(self) -> None:
         self.hidden_states_cache.clear()
+        self.mean_pool_sum = None
+        self.mean_pool_count = 0
 
 
 @dataclass

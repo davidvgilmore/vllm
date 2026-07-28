@@ -38,7 +38,7 @@ SequencePoolingHeadFn: TypeAlias = Callable[
     SequencePoolerHeadOutput,
 ]
 
-SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor | None]
 
 
 class SequencePooler(Pooler):
