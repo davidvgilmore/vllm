@@ -1083,6 +1083,7 @@ def test_is_chunked_prefill_supported(
         ("decoder", "CLS", "ALL", False),
         ("decoder", "LAST", "STEP", False),
         ("encoder_decoder", "MEAN", "ALL", False),
+        ("encoder_only", "MEAN", "ALL", False),
     ],
 )
 def test_chunked_prefill_pooling_method_support(
@@ -1100,6 +1101,15 @@ def test_chunked_prefill_pooling_method_support(
     )
 
     assert ModelConfig.is_chunked_prefill_supported.fget(config) is expected
+
+
+def test_gritlm_pooling_is_encoder_only_for_chunked_prefill():
+    """GritLM's custom mean pooler is chunk-unaware and its pooling runner is
+    bidirectional, so generic causal-MEAN chunked support must not apply."""
+    from vllm.model_executor.models.gritlm import GritLM
+    from vllm.model_executor.models.interfaces_base import get_attn_type
+
+    assert get_attn_type(GritLM) == "encoder_only"
 
 
 @pytest.mark.parametrize(

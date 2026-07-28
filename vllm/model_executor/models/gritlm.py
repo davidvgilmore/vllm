@@ -25,7 +25,7 @@ from vllm.tasks import PoolingTask
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type, default_pooling_type
 
 logger = init_logger(__name__)
 
@@ -196,6 +196,7 @@ class GritLMPooler(SequencePooler):
         )
 
 
+@attn_type("encoder_only")
 @default_pooling_type(seq_pooling_type="MEAN")
 class GritLM(LlamaForCausalLM):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
