@@ -23,6 +23,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -508,6 +509,30 @@ def test_throttle_defers_inflight_prefill_chunk():
     # When the cadence opens again, the prefill chunk resumes.
     output = scheduler.schedule()
     assert "chk0" in output.num_scheduled_tokens
+
+
+def test_chunked_pooling_can_schedule_exact_max_model_len() -> None:
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=8,
+        max_model_len=16,
+        enable_chunked_prefill=True,
+    )
+    request = Request(
+        request_id="pool-exact-max",
+        prompt_token_ids=[0] * 16,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens[request.request_id] == 8
+    _model_output(scheduler, first, [[]])
+
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] == 8
+    assert request.num_computed_tokens == 16
 
 
 def test_throttle_capacity_bound_guard_admits():

@@ -512,11 +512,16 @@ class Scheduler(SchedulerInterface):
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
+            sampled_token_reservation = (
+                0
+                if request.pooling_params is not None
+                else self.num_sampled_tokens_per_step
+            )
             num_new_tokens = min(
                 num_new_tokens,
                 self.max_model_len
                 - request.num_computed_tokens
-                - self.num_sampled_tokens_per_step,
+                - sampled_token_reservation,
             )
 
             # Schedule encoder inputs.
