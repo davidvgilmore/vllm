@@ -254,6 +254,32 @@ class TestMeanPool:
         assert states[0].mean_pool_sum is None
         assert states[1].mean_pool_count == 1
 
+    def test_mixed_batch_accumulator_is_independent_of_batch_buffer(self):
+        """One partial request must not alias or corrupt sibling state, and a
+        retained accumulator must not hold this step's batch tensor alive."""
+        pooler = MeanPool()
+        states = [PoolingStates(), PoolingStates()]
+        hidden = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+
+        out = pooler(
+            hidden,
+            _make_metadata(
+                [1, 4],
+                num_scheduled_tokens=[1, 2],
+                seq_lens=[1, 2],
+                pooling_states=states,
+            ),
+        )
+
+        # First request finished in one step; second is still accumulating.
+        assert isinstance(out, list)
+        assert torch.equal(out[0], torch.tensor([0.0, 1.0]))
+        assert out[1] is None
+        assert states[0].mean_pool_sum is None
+        assert states[1].mean_pool_count == 2
+        assert states[1].mean_pool_sum.data_ptr() != hidden.data_ptr()
+        assert torch.equal(states[1].mean_pool_sum, torch.tensor([6.0, 8.0]))
+
     def test_pooling_state_clean_releases_mean_accumulator(self):
         state = PoolingStates()
         state.mean_pool_sum = torch.ones(4, dtype=torch.float32)

@@ -59,17 +59,39 @@ class LastPool(SequencePoolingMethod):
 
 class MeanPool(SequencePoolingMethod):
     @staticmethod
-    def _sum_chunk(hidden_states: torch.Tensor) -> torch.Tensor:
+    def _segment_sums(
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens_cpu: torch.Tensor,
+    ) -> torch.Tensor:
+        """FP32 sum of this step's scheduled tokens, per request.
+
+        One segmented reduction for the whole batch keeps the kernel count
+        independent of batch size, so a single partially prefilled request
+        cannot turn a large co-scheduled batch into per-request launches.
+        """
+        num_seqs = num_scheduled_tokens_cpu.numel()
         hidden_size = hidden_states.shape[-1]
+        segment_ids = torch.repeat_interleave(
+            torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
+            num_scheduled_tokens_cpu.to(hidden_states.device),
+            output_size=hidden_states.shape[0],
+        )
+        segment_sums = torch.zeros(
+            (num_seqs, hidden_size),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
+
         bytes_per_token = hidden_size * torch.finfo(torch.float32).bits // 8
         chunk_size = max(1, _MEAN_POOL_ACCUMULATION_CHUNK_BYTES // bytes_per_token)
-        result = torch.zeros(
-            hidden_size, dtype=torch.float32, device=hidden_states.device
-        )
         for start in range(0, hidden_states.shape[0], chunk_size):
             end = min(start + chunk_size, hidden_states.shape[0])
-            result.add_(hidden_states[start:end].sum(dim=0, dtype=torch.float32))
-        return result
+            segment_sums.index_add_(
+                0,
+                segment_ids[start:end],
+                hidden_states[start:end].to(dtype=torch.float32),
+            )
+        return segment_sums
 
     @staticmethod
     def _forward_single_step(
@@ -140,20 +162,23 @@ class MeanPool(SequencePoolingMethod):
         pooling_cursor: PoolingCursor,
     ) -> SequencePoolingMethodOutput:
         prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
-        hidden_states_list = torch.split(
-            hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist()
+        chunk_sums = self._segment_sums(
+            hidden_states, pooling_cursor.num_scheduled_tokens_cpu
         )
         output_list: list[torch.Tensor | None] = []
-        for state, hidden_states_chunk, scheduled, prompt_len, finished in zip(
-            pooling_metadata.pooling_states,
-            hidden_states_list,
-            pooling_cursor.num_scheduled_tokens_cpu,
-            prompt_lens_cpu,
-            pooling_cursor.is_finished(),
+        for index, (state, scheduled, prompt_len, finished) in enumerate(
+            zip(
+                pooling_metadata.pooling_states,
+                pooling_cursor.num_scheduled_tokens_cpu,
+                prompt_lens_cpu,
+                pooling_cursor.is_finished(),
+            )
         ):
-            chunk_sum = self._sum_chunk(hidden_states_chunk)
+            chunk_sum = chunk_sums[index]
             if state.mean_pool_sum is None:
-                state.mean_pool_sum = chunk_sum
+                # Clone: the row is a view into this step's batch tensor, which
+                # a retained accumulator would keep alive across steps.
+                state.mean_pool_sum = chunk_sum.clone()
             else:
                 if (
                     state.mean_pool_sum.shape != chunk_sum.shape

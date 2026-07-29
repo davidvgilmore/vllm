@@ -744,7 +744,15 @@ class Scheduler(SchedulerInterface):
                         ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    # `skip_reading_prefix_cache` requests receive every prompt
+                    # hidden state (e.g. token-wise and causal-MEAN pooling), so
+                    # an external hit would advance num_computed_tokens past
+                    # tokens the pooler never sees. Individual connectors are not
+                    # required to honor the flag, so skip the query itself.
+                    if (
+                        self.connector is not None
+                        and not request.skip_reading_prefix_cache
+                    ):
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
