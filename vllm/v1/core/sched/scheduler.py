@@ -744,15 +744,7 @@ class Scheduler(SchedulerInterface):
                         ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    # `skip_reading_prefix_cache` requests receive every prompt
-                    # hidden state (e.g. token-wise and causal-MEAN pooling), so
-                    # an external hit would advance num_computed_tokens past
-                    # tokens the pooler never sees. Individual connectors are not
-                    # required to honor the flag, so skip the query itself.
-                    if (
-                        self.connector is not None
-                        and not request.skip_reading_prefix_cache
-                    ):
+                    if self.connector is not None:
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -773,6 +765,17 @@ class Scheduler(SchedulerInterface):
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
+
+                        if request.skip_reading_prefix_cache:
+                            # These requests must compute every prompt hidden
+                            # state (token-wise and causal-MEAN pooling), so an
+                            # external hit would advance num_computed_tokens
+                            # past tokens the pooler never sees. The query
+                            # itself still runs: stateful connectors initialize
+                            # their per-request tracking there, and skipping it
+                            # would break allocation.
+                            ext_tokens = 0
+                            load_kv_async = False
 
                         if partial_tail and ext_tokens > partial_tail:
                             # Remote strictly exceeds the full local hit: drop the

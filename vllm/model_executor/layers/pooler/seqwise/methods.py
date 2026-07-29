@@ -166,6 +166,9 @@ class MeanPool(SequencePoolingMethod):
             hidden_states, pooling_cursor.num_scheduled_tokens_cpu
         )
         output_list: list[torch.Tensor | None] = []
+        # Requests whose whole prompt arrived in this step; their means are
+        # produced by a single batched division after the loop.
+        single_step_indices: list[int] = []
         for index, (state, scheduled, prompt_len, finished) in enumerate(
             zip(
                 pooling_metadata.pooling_states,
@@ -175,6 +178,20 @@ class MeanPool(SequencePoolingMethod):
             )
         ):
             chunk_sum = chunk_sums[index]
+            if state.mean_pool_sum is None and finished:
+                # Single-step request inside a mixed batch: its whole prompt is
+                # in this step's segment sum, so it needs no accumulator at
+                # all. Defer the division to one batched op below, keeping the
+                # common short-request case off the batch's hot path.
+                total = int(scheduled)
+                if total != int(prompt_len) or total == 0:
+                    raise RuntimeError(
+                        "MEAN pooling accumulated an unexpected number of "
+                        f"tokens: {total} != {int(prompt_len)}"
+                    )
+                single_step_indices.append(index)
+                output_list.append(None)
+                continue
             if state.mean_pool_sum is None:
                 # Clone: the row is a view into this step's batch tensor, which
                 # a retained accumulator would keep alive across steps.
@@ -209,6 +226,20 @@ class MeanPool(SequencePoolingMethod):
 
             output_list.append(state.mean_pool_sum / state.mean_pool_count)
             state.clean()
+
+        if single_step_indices:
+            # One division for every request that completed in this step, so a
+            # co-scheduled partial request cannot make the batch's cost scale
+            # with the number of short requests beside it.
+            rows = torch.tensor(
+                single_step_indices, device=chunk_sums.device, dtype=torch.long
+            )
+            counts = pooling_cursor.num_scheduled_tokens_cpu[single_step_indices].to(
+                device=chunk_sums.device, dtype=torch.float32
+            )
+            means = chunk_sums[rows] / counts.unsqueeze(1)
+            for position, index in enumerate(single_step_indices):
+                output_list[index] = means[position]
 
         if all(output is not None for output in output_list):
             return torch.stack([output for output in output_list if output is not None])

@@ -280,6 +280,39 @@ class TestMeanPool:
         assert states[1].mean_pool_sum.data_ptr() != hidden.data_ptr()
         assert torch.equal(states[1].mean_pool_sum, torch.tensor([6.0, 8.0]))
 
+    def test_mixed_batch_cost_is_independent_of_batch_size(self):
+        """One partial request must not make the batch's op count scale with
+        the number of short requests co-scheduled beside it."""
+        pooler = MeanPool()
+        counts = {}
+        for num_seqs in (4, 64):
+            prompt_lens = [64] + [4] * (num_seqs - 1)
+            scheduled = [8] + [4] * (num_seqs - 1)
+            states = [PoolingStates() for _ in range(num_seqs)]
+            hidden = torch.randn(sum(scheduled), 8)
+
+            out = pooler(
+                hidden,
+                _make_metadata(
+                    prompt_lens,
+                    num_scheduled_tokens=scheduled,
+                    seq_lens=scheduled,
+                    pooling_states=states,
+                ),
+            )
+
+            assert out[0] is None
+            offset = 8
+            for index in range(1, num_seqs):
+                expected = hidden[offset : offset + 4].mean(dim=0)
+                assert torch.allclose(out[index], expected, atol=1e-5)
+                offset += 4
+            # Only the genuinely partial request retains an accumulator.
+            counts[num_seqs] = sum(
+                1 for state in states if state.mean_pool_sum is not None
+            )
+        assert counts == {4: 1, 64: 1}
+
     def test_pooling_state_clean_releases_mean_accumulator(self):
         state = PoolingStates()
         state.mean_pool_sum = torch.ones(4, dtype=torch.float32)
