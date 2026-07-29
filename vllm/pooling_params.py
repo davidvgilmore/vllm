@@ -125,10 +125,14 @@ class PoolingParams(
             # If prefix caching is enabled,
             # the output of all pooling may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            if self.task in ["token_embed", "token_classify"]:
-                self.skip_reading_prefix_cache = True
-            else:
-                self.skip_reading_prefix_cache = False
+            # Causal MEAN accumulates every prompt hidden state, so a cached
+            # prefix (including one served by a KV connector, which local
+            # prefix-caching support flags do not gate) would leave the
+            # accumulator short of the prompt length.
+            self.skip_reading_prefix_cache = (
+                self.task in ["token_embed", "token_classify"]
+                or pooler_config.seq_pooling_type == "MEAN"
+            )
 
         self._verify_step_pooling(pooler_config, valid_parameters)
 

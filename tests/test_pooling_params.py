@@ -205,3 +205,29 @@ def test_token_classify(pooling_type: str):
         with pytest.raises(ValueError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
+
+
+@pytest.mark.parametrize(
+    ("task", "seq_pooling_type", "expected"),
+    [
+        ("embed", "MEAN", True),
+        ("classify", "MEAN", True),
+        ("embed", "LAST", False),
+        ("embed", "CLS", False),
+        ("token_embed", "LAST", True),
+    ],
+)
+def test_skip_reading_prefix_cache_default(task, seq_pooling_type, expected):
+    """Causal MEAN accumulates every prompt hidden state, so it must not
+    consume a cached prefix served by prefix caching or a KV connector."""
+    params = PoolingParams(task=task)
+    params.verify(
+        MockModelConfig(
+            pooler_config=PoolerConfig(
+                seq_pooling_type=seq_pooling_type,
+                tok_pooling_type="ALL",
+            )
+        )
+    )
+
+    assert params.skip_reading_prefix_cache is expected

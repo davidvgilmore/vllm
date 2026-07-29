@@ -169,6 +169,28 @@ class TestEmbeddingPoolerHead:
         assert torch.allclose(torch.linalg.norm(out[0]), torch.tensor(1.0))
         assert torch.allclose(torch.linalg.norm(out[2]), torch.tensor(1.0))
 
+    def test_chunked_prefill_projector_receives_batched_input(self):
+        """Projectors may assume [batch, hidden]; a partially finished batch
+        must not hand them a bare 1-D row."""
+        seen_shapes = []
+
+        class _ShapeAsserting(torch.nn.Module):
+            def forward(self, x):
+                seen_shapes.append(tuple(x.shape))
+                assert x.ndim == 2, f"projector received {x.ndim}-D input"
+                return x
+
+        head = EmbeddingPoolerHead(projector=_ShapeAsserting())
+        pooled_data = [torch.randn(_HIDDEN), None, torch.randn(_HIDDEN)]
+        meta = _make_metadata(_make_params(_BATCH))
+
+        out = head(pooled_data, meta)
+
+        assert seen_shapes == [(2, _HIDDEN)]
+        assert out[1] is None
+        assert torch.equal(out[0], pooled_data[0])
+        assert torch.equal(out[2], pooled_data[2])
+
     def test_projector_then_matryoshka(self):
         proj = _linear(_HIDDEN, 8)
         head = EmbeddingPoolerHead(projector=proj)
@@ -300,6 +322,27 @@ class TestClassifierPoolerHead:
         assert torch.equal(out[0], (pooled_data[0] - 1.0) / 2.0)
         assert out[1] is None
         assert torch.equal(out[2], (pooled_data[2] - 1.0) / 2.0)
+
+    def test_chunked_prefill_classifier_receives_batched_input(self):
+        """Classifiers such as ClassifierWithReshape unsqueeze a batch
+        dimension, so a 1-D row would reshape into the wrong tensor."""
+        seen_shapes = []
+
+        class _ShapeAsserting(torch.nn.Module):
+            def forward(self, x):
+                seen_shapes.append(tuple(x.shape))
+                assert x.ndim == 2, f"classifier received {x.ndim}-D input"
+                return x
+
+        head = ClassifierPoolerHead(classifier=_ShapeAsserting())
+        pooled_data = [None, torch.randn(_HIDDEN)]
+        meta = _make_metadata(_make_params(2, task="classify"))
+
+        out = head(pooled_data, meta)
+
+        assert seen_shapes == [(1, _HIDDEN)]
+        assert out[0] is None
+        assert torch.equal(out[1], pooled_data[1])
 
     def test_classifier_then_platt_scaling(self):
         clf = _linear(_HIDDEN, 3)

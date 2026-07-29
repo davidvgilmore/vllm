@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from typing import TypeAlias
 
 import torch
@@ -15,6 +15,35 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from .methods import SequencePoolingMethodOutput
 
 SequencePoolerHeadOutput: TypeAlias = torch.Tensor | list[torch.Tensor | None]
+
+_BatchedHeadFn: TypeAlias = Callable[
+    [torch.Tensor, list[PoolingParams]], SequencePoolerHeadOutput
+]
+
+
+def _forward_finished_subset(
+    forward_batched: _BatchedHeadFn,
+    pooled_data: list[torch.Tensor | None],
+    pooling_params: list[PoolingParams],
+) -> list[torch.Tensor | None]:
+    """Run the finished requests of a chunked batch through the batched head.
+
+    Heads may assume a `[batch, hidden]` input, so the finished rows are
+    stacked and processed together, then scattered back into their original
+    positions with `None` left for requests still accumulating.
+    """
+    finished = [index for index, data in enumerate(pooled_data) if data is not None]
+    outputs: list[torch.Tensor | None] = [None] * len(pooled_data)
+    if not finished:
+        return outputs
+
+    batched = forward_batched(
+        torch.stack([pooled_data[index] for index in finished]),
+        [pooling_params[index] for index in finished],
+    )
+    for position, index in enumerate(finished):
+        outputs[index] = batched[position]
+    return outputs
 
 
 class SequencePoolerHead(nn.Module, ABC):
@@ -57,24 +86,6 @@ class EmbeddingPoolerHead(SequencePoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"embed"}
 
-    def _forward_chunk(
-        self,
-        pooled_data: torch.Tensor | None,
-        pooling_param: PoolingParams,
-    ) -> torch.Tensor | None:
-        if pooled_data is None:
-            return None
-        if self.head_dtype is not None:
-            pooled_data = pooled_data.to(self.head_dtype)
-        embeddings = (
-            self.projector(pooled_data) if self.projector is not None else pooled_data
-        )
-        if pooling_param.dimensions is not None:
-            embeddings = embeddings[..., : pooling_param.dimensions]
-        if self.activation is not None and pooling_param.use_activation:
-            embeddings = self.activation(embeddings)
-        return embeddings
-
     def forward(
         self,
         pooled_data: SequencePoolingMethodOutput,
@@ -88,12 +99,18 @@ class EmbeddingPoolerHead(SequencePoolerHead):
             )
 
         if isinstance(pooled_data, list) and any(data is None for data in pooled_data):
-            return [
-                self._forward_chunk(data, param)
-                for data, param in zip(pooled_data, pooling_params)
-            ]
+            return _forward_finished_subset(
+                self._forward_batched, pooled_data, pooling_params
+            )
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
+        return self._forward_batched(pooled_data, pooling_params)
+
+    def _forward_batched(
+        self,
+        pooled_data: torch.Tensor,
+        pooling_params: list[PoolingParams],
+    ) -> SequencePoolerHeadOutput:
         # pooled_data shape: [batchsize, hidden_size]
 
         if self.head_dtype is not None:
@@ -175,26 +192,6 @@ class ClassifierPoolerHead(SequencePoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify"}
 
-    def _forward_chunk(
-        self,
-        pooled_data: torch.Tensor | None,
-        pooling_param: PoolingParams,
-    ) -> torch.Tensor | None:
-        if pooled_data is None:
-            return None
-        if self.head_dtype is not None:
-            pooled_data = pooled_data.to(self.head_dtype)
-        logits = (
-            self.classifier(pooled_data) if self.classifier is not None else pooled_data
-        )
-        if self.logit_mean is not None:
-            logits = logits - self.logit_mean
-        if self.logit_sigma is not None:
-            logits = logits / self.logit_sigma
-        if self.activation is not None and pooling_param.use_activation:
-            logits = self.activation(logits)
-        return logits
-
     def forward(
         self,
         pooled_data: SequencePoolingMethodOutput,
@@ -208,12 +205,18 @@ class ClassifierPoolerHead(SequencePoolerHead):
             )
 
         if isinstance(pooled_data, list) and any(data is None for data in pooled_data):
-            return [
-                self._forward_chunk(data, param)
-                for data, param in zip(pooled_data, pooling_params)
-            ]
+            return _forward_finished_subset(
+                self._forward_batched, pooled_data, pooling_params
+            )
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
+        return self._forward_batched(pooled_data, pooling_params)
+
+    def _forward_batched(
+        self,
+        pooled_data: torch.Tensor,
+        pooling_params: list[PoolingParams],
+    ) -> SequencePoolerHeadOutput:
         # pooled_data shape: [batchsize, hidden_size]
 
         if self.head_dtype is not None:
